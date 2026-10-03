@@ -1,0 +1,359 @@
+name: Agentic QA PBI Validation
+
+run-name: Agentic QA Validation - PR #${{ github.event.pull_request.number }}
+
+# ============================================================
+# TRIGGER
+# ============================================================
+# Automatically starts when the Agentic QA platform
+# creates or updates a Pull Request.
+#
+# Important:
+# Only qa/* branches will actually execute the QA job.
+# ============================================================
+
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+
+
+# ============================================================
+# PREVENT DUPLICATE RUNS
+# ============================================================
+# If another commit is pushed to the same PR while an older
+# execution is still running, GitHub cancels the older run.
+# ============================================================
+
+concurrency:
+  group: agentic-qa-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+
+# ============================================================
+# PERMISSIONS
+# ============================================================
+
+permissions:
+  contents: read
+
+
+jobs:
+
+  qa-validation:
+
+    # ========================================================
+    # ONLY AGENTIC QA BRANCHES
+    # ========================================================
+    #
+    # Example:
+    #
+    # qa/1234-login-validation
+    # qa/5678-payment-flow
+    #
+    # Normal developer PRs will NOT execute this job.
+    # ========================================================
+
+    if: startsWith(github.head_ref, 'qa/')
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 30
+
+
+    steps:
+
+      # ======================================================
+      # CHECKOUT EXACT PR COMMIT
+      # ======================================================
+
+      - name: Checkout PR commit
+        uses: actions/checkout@v4
+
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+
+
+      # ======================================================
+      # DISPLAY EXECUTION INFORMATION
+      # ======================================================
+
+      - name: Display execution context
+
+        shell: bash
+
+        run: |
+
+          echo "======================================"
+          echo "       Agentic QA PBI Validation"
+          echo "======================================"
+
+          echo ""
+
+          echo "PR Number:"
+          echo "${{ github.event.pull_request.number }}"
+
+          echo ""
+
+          echo "QA Branch:"
+          echo "${{ github.head_ref }}"
+
+          echo ""
+
+          echo "Base Branch:"
+          echo "${{ github.base_ref }}"
+
+          echo ""
+
+          echo "Commit SHA:"
+          echo "${{ github.event.pull_request.head.sha }}"
+
+          echo ""
+
+          echo "======================================"
+
+
+      # ======================================================
+      # DETECT FILES CHANGED BY THIS PR
+      # ======================================================
+
+      - name: Detect changed Playwright tests
+
+        id: changed_tests
+
+        shell: bash
+
+        run: |
+
+          echo "Fetching base branch..."
+
+          git fetch origin "${{ github.base_ref }}"
+
+
+          echo ""
+          echo "======================================"
+          echo "Files changed by this PR"
+          echo "======================================"
+
+
+          mapfile -t CHANGED_FILES < <(
+
+            git diff \
+              --name-only \
+              --diff-filter=AM \
+              "origin/${{ github.base_ref }}...HEAD"
+
+          )
+
+
+          printf '%s\n' "${CHANGED_FILES[@]}"
+
+
+          # ==================================================
+          # FIND ONLY PLAYWRIGHT TEST FILES
+          # ==================================================
+
+          TEST_FILES=()
+
+
+          for file in "${CHANGED_FILES[@]}"; do
+
+            case "$file" in
+
+              tests/*.spec.js|\
+              tests/*.test.js|\
+              tests/*.spec.ts|\
+              tests/*.test.ts|\
+              e2e/*.spec.js|\
+              e2e/*.test.js|\
+              e2e/*.spec.ts|\
+              e2e/*.test.ts|\
+              specs/*.spec.js|\
+              specs/*.test.js|\
+              specs/*.spec.ts|\
+              specs/*.test.ts)
+
+                TEST_FILES+=("$file")
+
+                ;;
+
+            esac
+
+          done
+
+
+          echo ""
+          echo "======================================"
+          echo "PBI-related Playwright tests"
+          echo "======================================"
+
+
+          if [ "${#TEST_FILES[@]}" -eq 0 ]; then
+
+            echo "No Playwright test files were added or changed."
+
+            echo ""
+            echo "This PR does not contain an executable"
+            echo "PBI-related Playwright test."
+
+            exit 1
+
+          fi
+
+
+          printf '%s\n' "${TEST_FILES[@]}"
+
+
+          # ==================================================
+          # PASS TEST FILES TO THE EXECUTION STEP
+          # ==================================================
+
+          {
+
+            echo "files<<EOF"
+
+            printf '%s\n' "${TEST_FILES[@]}"
+
+            echo "EOF"
+
+          } >> "$GITHUB_OUTPUT"
+
+
+      # ======================================================
+      # SETUP NODE
+      # ======================================================
+
+      - name: Setup Node.js
+
+        uses: actions/setup-node@v4
+
+        with:
+
+          node-version: "20"
+
+          cache: npm
+
+
+      # ======================================================
+      # INSTALL PROJECT DEPENDENCIES
+      # ======================================================
+
+      - name: Install dependencies
+
+        run: npm ci
+
+
+      # ======================================================
+      # INSTALL PLAYWRIGHT
+      # ======================================================
+
+      - name: Install Playwright browsers
+
+        run: |
+
+          npx playwright install --with-deps
+
+
+      # ======================================================
+      # DISPLAY TESTS SELECTED FOR EXECUTION
+      # ======================================================
+
+      - name: Display selected tests
+
+        shell: bash
+
+        env:
+
+          CHANGED_TESTS: ${{ steps.changed_tests.outputs.files }}
+
+        run: |
+
+          echo "======================================"
+          echo "Tests selected for execution"
+          echo "======================================"
+
+          echo "$CHANGED_TESTS"
+
+
+      # ======================================================
+      # EXECUTE ONLY TESTS ADDED / MODIFIED BY THIS PR
+      # ======================================================
+
+      - name: Execute PBI-related Playwright tests
+
+        shell: bash
+
+        env:
+
+          CHANGED_TESTS: ${{ steps.changed_tests.outputs.files }}
+
+        run: |
+
+          mapfile -t TEST_FILES <<< "$CHANGED_TESTS"
+
+
+          echo "======================================"
+          echo "Starting Playwright Execution"
+          echo "======================================"
+
+
+          printf '%s\n' "${TEST_FILES[@]}"
+
+
+          echo ""
+
+
+          npx playwright test "${TEST_FILES[@]}"
+
+
+      # ======================================================
+      # UPLOAD PLAYWRIGHT HTML REPORT
+      # ======================================================
+
+      - name: Upload Playwright report
+
+        if: always()
+
+        uses: actions/upload-artifact@v4
+
+        with:
+
+          name: playwright-report-pr-${{ github.event.pull_request.number }}
+
+          path: playwright-report/
+
+          if-no-files-found: ignore
+
+          retention-days: 7
+
+
+      # ======================================================
+      # UPLOAD TEST EVIDENCE
+      #
+      # Includes depending on playwright.config:
+      #
+      # screenshots
+      # videos
+      # traces
+      # failure logs
+      #
+      # ======================================================
+
+      - name: Upload Playwright test results
+
+        if: always()
+
+        uses: actions/upload-artifact@v4
+
+        with:
+
+          name: test-results-pr-${{ github.event.pull_request.number }}
+
+          path: test-results/
+
+          if-no-files-found: ignore
+
+          retention-days: 7
